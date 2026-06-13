@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 from typing import List, Optional, Dict
 
@@ -10,6 +11,9 @@ from app.utils.helpers import ensure_dir, sync_retry, write_json
 from app.utils.logging import logger
 
 settings = get_settings()
+
+CN_END_PUNCT = {"。", "！", "?", ".", "!", "？", "…", "~", "～", "、", "；", ";", "：", ":"}
+CN_CONCAT_PUNCT = {"，", ",", "、"}
 
 
 class SubtitleError(Exception):
@@ -33,6 +37,88 @@ class SubtitleService:
                 raise SubtitleError(f"Failed to load Whisper model: {e}")
         return self._model
 
+    @staticmethod
+    def _ends_complete_sentence(text: str) -> bool:
+        stripped = text.strip()
+        if not stripped:
+            return True
+        last = stripped[-1]
+        if last in CN_END_PUNCT:
+            return True
+        if re.search(r"[。！？!?\.]$", stripped):
+            return True
+        return False
+
+    @staticmethod
+    def _count_cn_chars(text: str) -> int:
+        return len(re.findall(r"[\u4e00-\u9fff]", text))
+
+    @staticmethod
+    def _merge_cues(cues: List[SubtitleCue]) -> List[SubtitleCue]:
+        if len(cues) <= 1:
+            return cues
+
+        merged: List[SubtitleCue] = []
+        buffer: Optional[SubtitleCue] = None
+
+        min_gap = settings.SUBTITLE_MIN_MERGE_GAP_MS / 1000.0
+        max_duration = settings.SUBTITLE_MAX_MERGE_DURATION_S
+        min_cn = settings.SUBTITLE_MIN_CN_CHARS
+
+        for cue in cues:
+            clean_text = cue.text.strip()
+            if not clean_text:
+                continue
+
+            cue.text = clean_text
+
+            if buffer is None:
+                buffer = SubtitleCue(
+                    index=cue.index,
+                    start=cue.start,
+                    end=cue.end,
+                    text=cue.text,
+                )
+                continue
+
+            gap = cue.start - buffer.end
+            merged_duration = cue.end - buffer.start
+            cn_count = SubtitleService._count_cn_chars(buffer.text + cue.text)
+            ends_complete = SubtitleService._ends_complete_sentence(buffer.text)
+
+            should_merge = False
+            if not ends_complete and gap <= min_gap and merged_duration <= max_duration:
+                should_merge = True
+            elif cn_count < min_cn and gap <= min_gap and merged_duration <= max_duration:
+                should_merge = True
+            elif len(buffer.text) < 4 and gap <= min_gap and merged_duration <= max_duration:
+                should_merge = True
+
+            if should_merge:
+                connector = ""
+                if buffer.text and buffer.text[-1] not in CN_CONCAT_PUNCT and cue.text:
+                    first_char = cue.text[0]
+                    if re.match(r"[\u4e00-\u9fffA-Za-z0-9]", first_char):
+                        connector = "，" if SubtitleService._count_cn_chars(buffer.text) > 0 else " "
+                buffer.text = f"{buffer.text}{connector}{cue.text}"
+                buffer.end = cue.end
+            else:
+                merged.append(buffer)
+                buffer = SubtitleCue(
+                    index=cue.index,
+                    start=cue.start,
+                    end=cue.end,
+                    text=cue.text,
+                )
+
+        if buffer is not None:
+            merged.append(buffer)
+
+        for i, cue in enumerate(merged, 1):
+            cue.index = i
+
+        return merged
+
     @sync_retry(max_retries=2, delay=3.0, exceptions=(SubtitleError,))
     def transcribe_audio(
         self,
@@ -54,11 +140,13 @@ class SubtitleService:
                 language=language,
                 task=task,
                 verbose=False,
+                vad_filter=True,
+                vad_parameters={"min_silence_duration_ms": 500},
             )
 
-            cues: List[SubtitleCue] = []
+            raw_cues: List[SubtitleCue] = []
             for i, seg in enumerate(result.get("segments", []), 1):
-                cues.append(
+                raw_cues.append(
                     SubtitleCue(
                         index=i,
                         start=float(seg.get("start", 0)),
@@ -66,6 +154,8 @@ class SubtitleService:
                         text=seg.get("text", "").strip(),
                     )
                 )
+
+            cues = SubtitleService._merge_cues(raw_cues)
 
             detected_language = result.get("language", language)
 
@@ -75,7 +165,7 @@ class SubtitleService:
             )
 
             logger.info(
-                f"Transcription complete: {len(cues)} cues, "
+                f"Transcription complete: raw={len(raw_cues)} cues, merged={len(cues)} cues, "
                 f"language={detected_language}"
             )
 
@@ -132,7 +222,7 @@ class SubtitleService:
             hours = int(seconds // 3600)
             minutes = int((seconds % 3600) // 60)
             secs = int(seconds % 60)
-            millis = int((seconds - int(seconds)) * 1000
+            millis = int((seconds - int(seconds)) * 1000)
             return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
 
         try:

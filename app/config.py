@@ -40,6 +40,18 @@ class Settings(BaseSettings):
 
     FFMPEG_PATH: Optional[str] = None
 
+    HOT_MIN_PLAYS: int = 200
+    HOT_MIN_UNIQUE_LISTENERS: int = 80
+    HOT_MIN_COMPLETION_RATE: float = 0.75
+    HOT_MIN_SCORE: float = 0.8
+    HOT_MIN_PUBLISHED_HOURS: int = 24
+    HOT_BASELINE_LOOKBACK_DAYS: int = 14
+    HOT_BASELINE_MULTIPLIER: float = 1.5
+
+    SUBTITLE_MIN_MERGE_GAP_MS: int = 300
+    SUBTITLE_MAX_MERGE_DURATION_S: float = 8.0
+    SUBTITLE_MIN_CN_CHARS: int = 3
+
     APP_NAME: str = "Podcast Generator API"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
